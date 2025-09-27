@@ -62,11 +62,31 @@ async function startArthuron(){
   micStream.getTracks().forEach(t=>pc.addTrack(t, micStream));
 
   dataChannel = pc.createDataChannel('oai-events');
-  dataChannel.onopen = ()=>{
-    const instructions = session?.persona || "Tu es Arthuron par défaut.";
-    dataChannel.send(JSON.stringify({type:"session.update", session:{instructions}}));
-    log('[dc] open');
-  };
+ dataChannel.onopen = ()=>{
+  const instructions = session?.persona || "Tu es Arthuron.";
+  // 1) on applique la persona
+  dataChannel.send(JSON.stringify({
+    type: "session.update",
+    session: { instructions }
+  }));
+
+  // 2) intro parlée immédiate
+  const intro =
+    "Salut, moi c’est Arthuron, un vieux banc de Saint-Denis. " +
+    "Ça fait longtemps que j’attends quelqu’un avec qui parler. " +
+    "Comment vas-tu ?";
+
+  dataChannel.send(JSON.stringify({
+    type: "response.create",
+    response: {
+      modalities: ["audio"],
+      instructions: intro,
+      conversation: "none"
+    }
+  }));
+
+  log("[dc] open + intro envoyée");
+};
 
   const offer = await pc.createOffer({offerToReceiveAudio:true});
   await pc.setLocalDescription(offer);
