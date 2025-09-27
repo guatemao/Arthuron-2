@@ -94,7 +94,7 @@ def session():
 
     # Paramètres venant du client (avec défauts)
     asked_voice = (request.args.get("voice") or REALTIME_VOICE or "ash").strip()
-    speed = _parse_float(request.args.get("speed", "1.0"), 1.00)  # + lent
+    speed = _parse_float(request.args.get("speed", "1.10"), 1.10)  # + lent
     temp = _clamp_temperature(request.args.get("temp", "0.6"), minimum=0.6)
 
     # Style strict (mix #3 “vieux argent sec” + #4 “curateur minimal”)
