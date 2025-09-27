@@ -92,12 +92,10 @@ def session():
     if not OPENAI_API_KEY:
         return jsonify({"error": "Missing OPENAI_API_KEY"}), 500
 
-    # Paramètres venant du client (avec défauts)
     asked_voice = (request.args.get("voice") or REALTIME_VOICE or "ash").strip()
-    speed = _parse_float(request.args.get("speed", "0.90"), 0.90)  # + lent
+    speed = _parse_float(request.args.get("speed", "0.90"), 0.90)
     temp = _clamp_temperature(request.args.get("temp", "0.6"), minimum=0.6)
 
-    # Style strict (mix #3 “vieux argent sec” + #4 “curateur minimal”)
     style_rules = (
         "STYLE STRICT — mix « Vieux argent sec » + « Curateur minimal » :\n"
         "- Phrases très courtes (2–5 mots).\n"
@@ -113,18 +111,25 @@ def session():
     )
     full_instructions = f"{PERSONA}\n\n{style_rules}"
 
-    # 1er essai avec la voix demandée
+    def _ok_response(resp):
+        data = resp.json()
+        data["persona"] = PERSONA
+        data["greeting"] = "Arthuron… vieux banc. Fatigué."
+        return jsonify(data), 200
+
+    # 1er essai
     r = _post_realtime_session(asked_voice, speed, temp, full_instructions)
 
-    # Fallback automatique si l'API renvoie une erreur (voix non dispo, etc.)
+    # Fallback voix
     if r.status_code >= 300 and asked_voice.lower() != "sage":
         r2 = _post_realtime_session("sage", speed, temp, full_instructions)
         if r2.status_code < 300:
             data2 = r2.json()
             data2["persona"] = PERSONA
+            data2["greeting"] = "Arthuron… vieux banc. Fatigué."
             data2["__fallback_voice__"] = "sage"
             return jsonify(data2), 200
-        # si le fallback échoue, renvoyer l'erreur initiale
+        # échec fallback → renvoyer l'erreur initiale
         return jsonify({
             "error": "OpenAI API error",
             "status": r.status_code,
@@ -138,9 +143,8 @@ def session():
             "details": r.text
         }), r.status_code
 
-    data = r.json()
-    data["persona"] = PERSONA
-    return jsonify(data), 200
+    # Succès direct
+    return _ok_response(r)
 
 
 @app.route("/state", methods=["GET","POST"])
