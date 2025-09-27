@@ -36,6 +36,7 @@ let pc=null, micStream=null, dataChannel=null;
 let session=null;
 let running=false;
 let changing=false;
+let didIntro = false;
 
 async function fetchSession(){
   const r = await fetch('/session');
@@ -61,32 +62,39 @@ async function startArthuron(){
   });
   micStream.getTracks().forEach(t=>pc.addTrack(t, micStream));
 
-  dataChannel = pc.createDataChannel('oai-events');
- dataChannel.onopen = ()=>{
+dataChannel = pc.createDataChannel('oai-events');
+
+// ⛏️  REMPLACE TOUT ton onopen par ceci :
+dataChannel.onopen = async ()=>{
   const instructions = session?.persona || "Tu es Arthuron.";
-  // 1) on applique la persona
+
   dataChannel.send(JSON.stringify({
     type: "session.update",
     session: { instructions }
   }));
 
-  // 2) intro parlée immédiate
-  const intro =
-    "Salut, moi c’est Arthuron, un vieux banc de Saint-Denis. " +
-    "Ça fait longtemps que j’attends quelqu’un avec qui parler. " +
-    "Comment vas-tu ?";
+  // ← calcule ici
+  const greetedOnce = sessionStorage.getItem("arthuron_greeted") === "1";
 
-  dataChannel.send(JSON.stringify({
-    type: "response.create",
-    response: {
-      modalities: ["audio"],
-      instructions: intro,
-      conversation: "none"
-    }
-  }));
-
-  log("[dc] open + intro envoyée");
+  if (!didIntro && !greetedOnce) {
+    didIntro = true;
+    const intro = session?.greeting || "Arthuron… vieux banc. Fatigué.";
+    await new Promise(r=>setTimeout(r, 180)); // 120→180ms, plus sûr
+    dataChannel.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["audio"],
+        instructions: intro,
+        conversation: "none"
+      }
+    }));
+    sessionStorage.setItem("arthuron_greeted", "1");
+    log("[dc] intro envoyée");
+  } else {
+    log("[dc] intro déjà jouée");
+  }
 };
+
 
   const offer = await pc.createOffer({offerToReceiveAudio:true});
   await pc.setLocalDescription(offer);
