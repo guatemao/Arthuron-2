@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Arthuron AutoStart — Synchro ON/OFF</title>
+<style>
+  body{background:#0b0b10;color:#fff;font-family:sans-serif;margin:20px}
+  #toggleBtn{padding:10px 14px;font-size:18px;border:2px solid #333;border-radius:6px;font-weight:700;cursor:pointer}
+  #log{background:#111;color:#0f0;padding:10px;height:220px;overflow:auto;white-space:pre-wrap}
+  .on{background:#1e8e3e;color:#fff}.off{background:#a11;color:#fff}
+</style>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+  <h1>Arthuron AutoStart</h1>
+  <p>Status: <span id="status">prêt</span></p>
+  <button id="toggleBtn" class="off">OFF</button>
+  <audio id="remoteAudio" autoplay></audio>
+  <pre id="log"></pre>
+
+<script>
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const btn = document.getElementById('toggleBtn');
+const remoteAudio = document.getElementById('remoteAudio');
+
+function log(m){ logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; console.log(m); }
+function setStatus(s){ statusEl.textContent = s; }
+function uiSet(on){
+  if(on){ btn.textContent='ON'; btn.classList.add('on'); btn.classList.remove('off'); }
+  else  { btn.textContent='OFF'; btn.classList.add('off'); btn.classList.remove('on'); }
+}
+
+let pc=null, micStream=null, dataChannel=null;
+let session=null;
+let running=false;
+let changing=false;
+
+async function fetchSession(){
+  const r = await fetch('/session');
+  const txt = await r.text();
+  try { return JSON.parse(txt); }
+  catch(e){ log('SESSION BODY:\n'+txt); throw e; }
+}
+
+async function startArthuron(){
+  if(running) return;
+  setStatus('initialisation…');
+  session = await fetchSession();
+  const KEY = session?.client_secret?.value;
+  const model = session?.model || 'gpt-4o-mini-realtime-preview';
+  if(!KEY) throw new Error('EPHEMERAL_KEY manquant');
+
+  pc = new RTCPeerConnection();
+  pc.onconnectionstatechange = ()=>log('[pc] '+pc.connectionState);
+  pc.ontrack = e=>{ remoteAudio.srcObject = e.streams[0]; };
+
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {echoCancellation:true,noiseSuppression:true,autoGainControl:true}
+  });
+  micStream.getTracks().forEach(t=>pc.addTrack(t, micStream));
+
+  dataChannel = pc.createDataChannel('oai-events');
+  dataChannel.onopen = ()=>{
+    const instructions = session?.persona || "Tu es Arthuron par défaut.";
+    dataChannel.send(JSON.stringify({type:"session.update", session:{instructions}}));
+    log('[dc] open');
+  };
+
+  const offer = await pc.createOffer({offerToReceiveAudio:true});
+  await pc.setLocalDescription(offer);
+
+  // Appel direct OpenAI (comme ta version qui marche)
+  const sdpResp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
+    method:'POST',
+    headers:{ 'Authorization':`Bearer ${KEY}`, 'Content-Type':'application/sdp' },
+    body: offer.sdp
+  });
+  if(!sdpResp.ok){
+    const t = await sdpResp.text();
+    throw new Error(`SDP error (${sdpResp.status}): ${t.slice(0,200)}`);
+  }
+  const answer = {type:'answer', sdp: await sdpResp.text()};
+  await pc.setRemoteDescription(answer);
+
+  setStatus('connecté — parle près du micro');
+  running = true;
+  log('✅ Realtime connecté');
+}
+
+function stopArthuron(){
+  if(!running) return;
+  try{
+    if(dataChannel){ try{ dataChannel.close(); }catch{} }
+    if(pc){ try{ pc.close(); }catch{} }
+    if(micStream){ micStream.getTracks().forEach(t=>{ try{ t.stop(); }catch{} }); }
+  }finally{
+    dataChannel=null; pc=null; micStream=null; remoteAudio.srcObject=null;
+    setStatus('prêt'); running=false; log('⏹️  Session arrêtée');
+  }
+}
+
+/* ---------- Synchro globale via Socket.IO ---------- */
+const socket = io(); // même domaine
+socket.on('connect', ()=>log('[socket] connect'));
+socket.on('state_update', async (st)=>{
+  const wantOn = (st?.status === 'ON');
+  log('[socket] state_update => '+st?.status);
+  uiSet(wantOn);
+  if(changing) return;
+  try{
+    changing = true;
+    if(wantOn && !running) await startArthuron();
+    if(!wantOn && running)  stopArthuron();
+  }catch(e){
+    log('Erreur synchro: '+(e?.message||e));
+  }finally{
+    changing = false;
+  }
+});
+
+/* ---------- Clic utilisateur ---------- */
+btn.addEventListener('click', async ()=>{
+  const target = (btn.textContent.trim() === 'OFF') ? 'ON' : 'OFF';
+  uiSet(target === 'ON');
+  try{
+    const r = await fetch('/state', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ status: target })
+    });
+    if(!r.ok){ const t = await r.text(); throw new Error(`POST /state ${r.status}: ${t}`); }
+    // Le start/stop réel se fait à la réception de state_update (synchro multi-clients)
+  }catch(e){
+    log('Erreur /state: '+(e?.message||e));
+  }
+});
+</script>
+</body>
+</html>
