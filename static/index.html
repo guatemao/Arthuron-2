@@ -188,6 +188,8 @@ function stopArthuron(){
 
 /* ---------- Synchro Socket.IO ---------- */
 const socket = io();
+socket.on('connect_error', (e)=>log('[socket] connect_error '+(e?.message||e)));
+socket.on('disconnect', (r)=>log('[socket] disconnect '+r));
 socket.on('connect', ()=>log('[socket] connect'));
 socket.on('state_update', async (st)=>{
   const wantOn = (st?.status === 'ON');
@@ -205,21 +207,37 @@ socket.on('state_update', async (st)=>{
   }
 });
 
-/* ---------- Clic utilisateur ---------- */
+/* ---------- Clic utilisateur : OPTIMISTIC ACTION ---------- */
 btn.addEventListener('click', async ()=>{
-  const target = (btn.textContent.trim() === 'OFF') ? 'ON' : 'OFF';
-  uiSet(target === 'ON');
+  const goingOn = (btn.textContent.trim() === 'OFF'); // cible = ON ?
+  uiSet(goingOn);
+
+  // Action locale immédiate (pas d’attente socket)
+  try{
+    if(!changing){
+      changing = true;
+      if(goingOn && !running) await startArthuron();
+      if(!goingOn && running)  stopArthuron();
+    }
+  } catch(e){
+    log('Erreur action locale: '+(e?.message||e));
+  } finally {
+    changing = false;
+  }
+
+  // Informe le serveur (synchro autres clients)
   try{
     const r = await fetch('/state', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ status: target })
+      body: JSON.stringify({ status: goingOn ? 'ON' : 'OFF' })
     });
     if(!r.ok){ const t = await r.text(); throw new Error(`POST /state ${r.status}: ${t}`); }
   }catch(e){
     log('Erreur /state: '+(e?.message||e));
   }
 });
+
 
 
 
