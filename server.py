@@ -58,8 +58,7 @@ def _post_realtime_session(voice, speed, temp, instructions):
             "silence_duration_ms": 1100, # silences longs
             "threshold": 0.55            # moins bavard
         },
-        # Durcisseur (décommente si besoin de couper court en dur)
-        # "max_response_output_tokens": 50
+        # "max_response_output_tokens": 50  # durcir si besoin
     }
     return requests.post(
         "https://api.openai.com/v1/realtime/sessions",
@@ -120,14 +119,14 @@ def session():
     # 1er essai
     r = _post_realtime_session(asked_voice, speed, temp, full_instructions)
 
-    # Fallback voix
-    if r.status_code >= 300 and asked_voice.lower() != "sage":
-        r2 = _post_realtime_session("sage", speed, temp, full_instructions)
+    # Fallback voix (plus robuste pour Realtime)
+    if r.status_code >= 300 and asked_voice.lower() != "alloy":
+        r2 = _post_realtime_session("alloy", speed, temp, full_instructions)
         if r2.status_code < 300:
             data2 = r2.json()
             data2["persona"] = PERSONA
             data2["greeting"] = "Arthuron… vieux banc. Fatigué."
-            data2["__fallback_voice__"] = "sage"
+            data2["__fallback_voice__"] = "alloy"
             return jsonify(data2), 200
         # échec fallback → renvoyer l'erreur initiale
         return jsonify({
@@ -157,7 +156,8 @@ def state():
             if new_status not in ("ON","OFF"):
                 return jsonify({"error":"bad status"}), 400
             GLOBAL_STATE["status"] = new_status
-            socketio.emit("state_update", GLOBAL_STATE)  # pas de broadcast=True
+            # broadcast=True pour synchroniser tous les clients
+            socketio.emit("state_update", GLOBAL_STATE, broadcast=True)
             return jsonify(GLOBAL_STATE), 200
         return jsonify(GLOBAL_STATE), 200
     except Exception as e:
@@ -185,13 +185,15 @@ def static_proxy(path):
 # ---------------------------
 @socketio.on("connect")
 def handle_connect():
+    # renvoie l'état courant au client qui arrive
     emit("state_update", GLOBAL_STATE)
 
 @socketio.on("toggle_state")
 def handle_toggle(data):
     global GLOBAL_STATE
     GLOBAL_STATE["status"] = data.get("status", "OFF")
-    emit("state_update", GLOBAL_STATE)
+    # broadcast=True ici aussi
+    emit("state_update", GLOBAL_STATE, broadcast=True)
 
 # ---------------------------
 # Run
