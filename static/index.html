@@ -25,6 +25,10 @@ const logEl = document.getElementById('log');
 const btn = document.getElementById('toggleBtn');
 const remoteAudio = document.getElementById('remoteAudio');
 
+remoteAudio.autoplay = true;
+remoteAudio.playsInline = true;
+remoteAudio.muted = false;
+
 function log(m){ logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; console.log(m); }
 function setStatus(s){ statusEl.textContent = s; }
 function uiSet(on){
@@ -45,55 +49,178 @@ async function fetchSession(){
   catch(e){ log('SESSION BODY:\n'+txt); throw e; }
 }
 
+function once(target, event){
+  return new Promise(res=>{
+    const h = (...a)=>{ target.removeEventListener(event, h); res(...a); };
+    target.addEventListener(event, h);
+  });
+}
+
 async function startArthuron(){
   if(running) return;
   setStatus('initialisation…');
   session = await fetchSession();
   const KEY = session?.client_secret?.value;
   const model = session?.model || 'gpt-4o-mini-realtime-preview';
+  const voiceFromSession = session?.voice || session?.default_voice || 'ash';
   if(!KEY) throw new Error('EPHEMERAL_KEY manquant');
 
   pc = new RTCPeerConnection();
   pc.onconnectionstatechange = ()=>log('[pc] '+pc.connectionState);
-  pc.ontrack = e=>{ remoteAudio.srcObject = e.streams[0]; };
+
+  // Track promise pour savoir quand le flux audio distant est prêt
+  const trackReady = new Promise(res=>{
+    pc.ontrack = e=>{
+      remoteAudio.srcObject = e.streams[0];
+      log('[pc] ontrack');
+      res();
+    };
+  });
 
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: {echoCancellation:true,noiseSuppression:true,autoGainControl:true}
   });
   micStream.getTracks().forEach(t=>pc.addTrack(t, micStream));
 
-dataChannel = pc.createDataChannel('oai-events');
+  dataChannel = pc.createDataChannel('oai-events');
 
-// ⛏️  REMPLACE TOUT ton onopen par ceci :
-dataChannel.onopen = async ()=>{
-  const instructions = session?.persona || "Tu es Arthuron.";
-
-  dataChannel.send(JSON.stringify({
-    type: "session.update",
-    session: { instructions }
-  }));
-
-  // ← calcule ici
-  const greetedOnce = sessionStorage.getItem("arthuron_greeted") === "1";
-
-  if (!didIntro && !greetedOnce) {
-    didIntro = true;
-    const intro = session?.greeting || "Arthuron… vieux banc. Fatigué.";
-    await new Promise(r=>setTimeout(r, 180)); // 120→180ms, plus sûr
-    dataChannel.send(JSON.stringify({
-      type: "response.create",
-      response: {
-        modalities: ["audio"],
-        instructions: intro,
-        conversation: "none"
+  // Collecte d’erreurs depuis la datachannel
+  dataChannel.onmessage = (ev)=>{
+    try{
+      const msg = JSON.parse(ev.data);
+      if(msg?.type === 'error'){
+        log('[dc][error] ' + (msg.error || JSON.stringify(msg)));
       }
-    }));
-    sessionStorage.setItem("arthuron_greeted", "1");
-    log("[dc] intro envoyée");
-  } else {
-    log("[dc] intro déjà jouée");
+    }catch{}
+  };
+
+  // On n’envoie PAS encore l’intro ici.
+  const dcOpen = new Promise(res=>{
+    dataChannel.onopen = ()=>{
+      log('[dc] open');
+      // On pousse les instructions dans la session courante
+      const instructions = session?.persona || "Tu es Arthuron.";
+      dataChannel.send(JSON.stringify({
+        type: "session.update",
+        session: { instructions, voice: voiceFromSession }
+      }));
+      res();
+    };
+  });
+
+  const offer = await pc.createOffer({offerToReceiveAudio:true});
+  await pc.setLocalDescription(offer);
+
+  const sdpResp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
+    method:'POST',
+    headers:{ 'Authorization':`Bearer ${KEY}`, 'Content-Type':'application/sdp' },
+    body: offer.sdp
+  });
+  if(!sdpResp.ok){
+    const t = await sdpResp.text();
+    throw new Error(`SDP error (${sdpResp.status}): ${t.slice(0,200)}`);
   }
-};
+  const answer = {type:'answer', sdp: await sdpResp.text()};
+  await pc.setRemoteDescription(answer);
+
+  // ✅ Attendre datachannel OUVERTE + premier track audio
+  await Promise.all([dcOpen, trackReady]);
+
+  setStatus('connecté — parle près du micro');
+  running = true;
+  log('✅ Realtime connecté');
+
+  // --- INTRO FIABLE ---
+  try{
+    const intro = session?.greeting || "Arthuron… vieux banc. Fatigué.";
+    // Clé de mémo propre à la session (évite un blocage de tests)
+    const sessId = session?.id || session?.client_secret?.id || (Date.now()+Math.random()).toString(36);
+    const greetedKey = `arthuron_greeted_${sessId}`;
+    const greetedOnce = sessionStorage.getItem(greetedKey) === "1";
+
+    if(!didIntro && !greetedOnce){
+      didIntro = true;
+      // petite latence pour laisser l’ASR se taire
+      await new Promise(r=>setTimeout(r, 220));
+      const payload = {
+        type: "response.create",
+        response: {
+          modalities: ["audio"],
+          instructions: intro,
+          // voice explicite par sécurité
+          voice: voiceFromSession,
+          conversation: "none"
+        }
+      };
+      dataChannel.send(JSON.stringify(payload));
+      sessionStorage.setItem(greetedKey, "1");
+      log("[dc] intro envoyée");
+    }else{
+      log("[dc] intro déjà jouée");
+    }
+  }catch(e){
+    log("[dc] intro failed: " + (e?.message||e));
+    // Retry light une fois si ça plante au tout début
+    try{
+      await new Promise(r=>setTimeout(r, 400));
+      dataChannel.send(JSON.stringify({
+        type: "response.create",
+        response: { modalities:["audio"], instructions:(session?.greeting || "Arthuron… vieux banc. Fatigué."), voice: (session?.voice || 'ash'), conversation:"none" }
+      }));
+      log("[dc] intro retry ok");
+    }catch(e2){
+      log("[dc] intro retry failed: " + (e2?.message||e2));
+    }
+  }
+}
+
+function stopArthuron(){
+  if(!running) return;
+  try{
+    if(dataChannel){ try{ dataChannel.close(); }catch{} }
+    if(pc){ try{ pc.close(); }catch{} }
+    if(micStream){ micStream.getTracks().forEach(t=>{ try{ t.stop(); }catch{} }); }
+  }finally{
+    dataChannel=null; pc=null; micStream=null; remoteAudio.srcObject=null;
+    setStatus('prêt'); running=false; log('⏹️  Session arrêtée');
+  }
+}
+
+/* ---------- Synchro Socket.IO ---------- */
+const socket = io();
+socket.on('connect', ()=>log('[socket] connect'));
+socket.on('state_update', async (st)=>{
+  const wantOn = (st?.status === 'ON');
+  log('[socket] state_update => '+st?.status);
+  uiSet(wantOn);
+  if(changing) return;
+  try{
+    changing = true;
+    if(wantOn && !running) await startArthuron();
+    if(!wantOn && running)  stopArthuron();
+  }catch(e){
+    log('Erreur synchro: '+(e?.message||e));
+  }finally{
+    changing = false;
+  }
+});
+
+/* ---------- Clic utilisateur ---------- */
+btn.addEventListener('click', async ()=>{
+  const target = (btn.textContent.trim() === 'OFF') ? 'ON' : 'OFF';
+  uiSet(target === 'ON');
+  try{
+    const r = await fetch('/state', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ status: target })
+    });
+    if(!r.ok){ const t = await r.text(); throw new Error(`POST /state ${r.status}: ${t}`); }
+  }catch(e){
+    log('Erreur /state: '+(e?.message||e));
+  }
+});
+
 
 
   const offer = await pc.createOffer({offerToReceiveAudio:true});
