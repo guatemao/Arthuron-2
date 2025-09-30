@@ -1,6 +1,6 @@
 flask
 flask-cors
+openai
 python-dotenv
-requests
-flask-socketio
-eventlet
+gunicorn
+requests>=2.32
