@@ -16,7 +16,7 @@
   <h1>Arthuron AutoStart</h1>
   <p>Status: <span id="status">prêt</span></p>
   <button id="toggleBtn" class="off">OFF</button>
-  <audio id="remoteAudio" autoplay></audio>
+  <audio id="remoteAudio" autoplay playsinline></audio>
   <pre id="log"></pre>
 
 <script>
@@ -25,9 +25,9 @@ const logEl = document.getElementById('log');
 const btn = document.getElementById('toggleBtn');
 const remoteAudio = document.getElementById('remoteAudio');
 
-remoteAudio.autoplay = true;
-remoteAudio.playsInline = true;
-remoteAudio.muted = false;
+// ► Intro WAV local
+const introAudio = new Audio('/static/intro.wav'); // place ton fichier ici
+introAudio.preload = 'auto';
 
 function log(m){ logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; console.log(m); }
 function setStatus(s){ statusEl.textContent = s; }
@@ -40,7 +40,6 @@ let pc=null, micStream=null, dataChannel=null;
 let session=null;
 let running=false;
 let changing=false;
-let didIntro = false;
 
 async function fetchSession(){
   const r = await fetch('/session');
@@ -56,8 +55,18 @@ function once(target, event){
   });
 }
 
+async function playIntroWav(){
+  try{
+    await introAudio.play();            // démarrage (nécessite un clic utilisateur -> OK)
+    await once(introAudio, 'ended');    // on attend la fin pour éviter le chevauchement de voix
+  }catch(e){
+    log('[intro] échec lecture: '+(e?.message||e));
+  }
+}
+
 async function startArthuron(){
   if(running) return;
+
   setStatus('initialisation…');
   session = await fetchSession();
   const KEY = session?.client_secret?.value;
@@ -67,24 +76,26 @@ async function startArthuron(){
 
   pc = new RTCPeerConnection();
   pc.onconnectionstatechange = ()=>log('[pc] '+pc.connectionState);
-
-  // Track promise pour savoir quand le flux audio distant est prêt
-  const trackReady = new Promise(res=>{
-    pc.ontrack = e=>{
-      remoteAudio.srcObject = e.streams[0];
-      log('[pc] ontrack');
-      res();
-    };
-  });
+  pc.ontrack = e=>{
+    remoteAudio.srcObject = e.streams[0];
+    log('[pc] ontrack');
+  };
 
   micStream = await navigator.mediaDevices.getUserMedia({
-    audio: {echoCancellation:true,noiseSuppression:true,autoGainControl:true}
+    audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
   });
   micStream.getTracks().forEach(t=>pc.addTrack(t, micStream));
 
   dataChannel = pc.createDataChannel('oai-events');
-
-  // Collecte d’erreurs depuis la datachannel
+  dataChannel.onopen = ()=>{
+    log('[dc] open');
+    // ► Conserver persona/voix SANS intro
+    const instructions = session?.persona || "Tu es Arthuron.";
+    dataChannel.send(JSON.stringify({
+      type: "session.update",
+      session: { instructions, voice: voiceFromSession }
+    }));
+  };
   dataChannel.onmessage = (ev)=>{
     try{
       const msg = JSON.parse(ev.data);
@@ -94,21 +105,7 @@ async function startArthuron(){
     }catch{}
   };
 
-  // On n’envoie PAS encore l’intro ici.
-  const dcOpen = new Promise(res=>{
-    dataChannel.onopen = ()=>{
-      log('[dc] open');
-      // On pousse les instructions dans la session courante
-      const instructions = session?.persona || "Tu es Arthuron.";
-      dataChannel.send(JSON.stringify({
-        type: "session.update",
-        session: { instructions, voice: voiceFromSession }
-      }));
-      res();
-    };
-  });
-
-  const offer = await pc.createOffer({offerToReceiveAudio:true});
+  const offer = await pc.createOffer({ offerToReceiveAudio:true });
   await pc.setLocalDescription(offer);
 
   const sdpResp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
@@ -123,55 +120,9 @@ async function startArthuron(){
   const answer = {type:'answer', sdp: await sdpResp.text()};
   await pc.setRemoteDescription(answer);
 
-  // ✅ Attendre datachannel OUVERTE + premier track audio
-  await Promise.all([dcOpen, trackReady]);
-
   setStatus('connecté — parle près du micro');
   running = true;
   log('✅ Realtime connecté');
-
-  // --- INTRO FIABLE ---
-  try{
-    const intro = session?.greeting || "Arthuron… vieux banc. Fatigué.";
-    // Clé de mémo propre à la session (évite un blocage de tests)
-    const sessId = session?.id || session?.client_secret?.id || (Date.now()+Math.random()).toString(36);
-    const greetedKey = `arthuron_greeted_${sessId}`;
-    const greetedOnce = sessionStorage.getItem(greetedKey) === "1";
-
-    if(!didIntro && !greetedOnce){
-      didIntro = true;
-      // petite latence pour laisser l’ASR se taire
-      await new Promise(r=>setTimeout(r, 220));
-      const payload = {
-        type: "response.create",
-        response: {
-          modalities: ["audio"],
-          instructions: intro,
-          // voice explicite par sécurité
-          voice: voiceFromSession,
-          conversation: "none"
-        }
-      };
-      dataChannel.send(JSON.stringify(payload));
-      sessionStorage.setItem(greetedKey, "1");
-      log("[dc] intro envoyée");
-    }else{
-      log("[dc] intro déjà jouée");
-    }
-  }catch(e){
-    log("[dc] intro failed: " + (e?.message||e));
-    // Retry light une fois si ça plante au tout début
-    try{
-      await new Promise(r=>setTimeout(r, 400));
-      dataChannel.send(JSON.stringify({
-        type: "response.create",
-        response: { modalities:["audio"], instructions:(session?.greeting || "Arthuron… vieux banc. Fatigué."), voice: (session?.voice || 'ash'), conversation:"none" }
-      }));
-      log("[dc] intro retry ok");
-    }catch(e2){
-      log("[dc] intro retry failed: " + (e2?.message||e2));
-    }
-  }
 }
 
 function stopArthuron(){
@@ -198,7 +149,7 @@ socket.on('state_update', async (st)=>{
   if(changing) return;
   try{
     changing = true;
-    if(wantOn && !running) await startArthuron();
+    if(wantOn && !running) await startArthuron();  // pas d’intro ici -> évite double lecture sur clients passifs
     if(!wantOn && running)  stopArthuron();
   }catch(e){
     log('Erreur synchro: '+(e?.message||e));
@@ -207,17 +158,21 @@ socket.on('state_update', async (st)=>{
   }
 });
 
-/* ---------- Clic utilisateur : OPTIMISTIC ACTION ---------- */
+/* ---------- Clic utilisateur : ON joue l’intro WAV PUIS on start ---------- */
 btn.addEventListener('click', async ()=>{
   const goingOn = (btn.textContent.trim() === 'OFF'); // cible = ON ?
   uiSet(goingOn);
 
-  // Action locale immédiate (pas d’attente socket)
   try{
     if(!changing){
       changing = true;
-      if(goingOn && !running) await startArthuron();
-      if(!goingOn && running)  stopArthuron();
+      if(goingOn && !running){
+        await playIntroWav();          // ← intro simple en WAV
+        await startArthuron();         // ← ensuite seulement on connecte le Realtime
+      }
+      if(!goingOn && running){
+        stopArthuron();
+      }
     }
   } catch(e){
     log('Erreur action locale: '+(e?.message||e));
@@ -233,78 +188,6 @@ btn.addEventListener('click', async ()=>{
       body: JSON.stringify({ status: goingOn ? 'ON' : 'OFF' })
     });
     if(!r.ok){ const t = await r.text(); throw new Error(`POST /state ${r.status}: ${t}`); }
-  }catch(e){
-    log('Erreur /state: '+(e?.message||e));
-  }
-});
-
-
-
-
-  const offer = await pc.createOffer({offerToReceiveAudio:true});
-  await pc.setLocalDescription(offer);
-
-  // Appel direct OpenAI (comme ta version qui marche)
-  const sdpResp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
-    method:'POST',
-    headers:{ 'Authorization':`Bearer ${KEY}`, 'Content-Type':'application/sdp' },
-    body: offer.sdp
-  });
-  if(!sdpResp.ok){
-    const t = await sdpResp.text();
-    throw new Error(`SDP error (${sdpResp.status}): ${t.slice(0,200)}`);
-  }
-  const answer = {type:'answer', sdp: await sdpResp.text()};
-  await pc.setRemoteDescription(answer);
-
-  setStatus('connecté — parle près du micro');
-  running = true;
-  log('✅ Realtime connecté');
-}
-
-function stopArthuron(){
-  if(!running) return;
-  try{
-    if(dataChannel){ try{ dataChannel.close(); }catch{} }
-    if(pc){ try{ pc.close(); }catch{} }
-    if(micStream){ micStream.getTracks().forEach(t=>{ try{ t.stop(); }catch{} }); }
-  }finally{
-    dataChannel=null; pc=null; micStream=null; remoteAudio.srcObject=null;
-    setStatus('prêt'); running=false; log('⏹️  Session arrêtée');
-  }
-}
-
-/* ---------- Synchro globale via Socket.IO ---------- */
-const socket = io(); // même domaine
-socket.on('connect', ()=>log('[socket] connect'));
-socket.on('state_update', async (st)=>{
-  const wantOn = (st?.status === 'ON');
-  log('[socket] state_update => '+st?.status);
-  uiSet(wantOn);
-  if(changing) return;
-  try{
-    changing = true;
-    if(wantOn && !running) await startArthuron();
-    if(!wantOn && running)  stopArthuron();
-  }catch(e){
-    log('Erreur synchro: '+(e?.message||e));
-  }finally{
-    changing = false;
-  }
-});
-
-/* ---------- Clic utilisateur ---------- */
-btn.addEventListener('click', async ()=>{
-  const target = (btn.textContent.trim() === 'OFF') ? 'ON' : 'OFF';
-  uiSet(target === 'ON');
-  try{
-    const r = await fetch('/state', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ status: target })
-    });
-    if(!r.ok){ const t = await r.text(); throw new Error(`POST /state ${r.status}: ${t}`); }
-    // Le start/stop réel se fait à la réception de state_update (synchro multi-clients)
   }catch(e){
     log('Erreur /state: '+(e?.message||e));
   }
