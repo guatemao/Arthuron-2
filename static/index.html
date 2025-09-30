@@ -16,7 +16,13 @@
   <h1>Arthuron AutoStart</h1>
   <p>Status: <span id="status">prêt</span></p>
   <button id="toggleBtn" class="off">OFF</button>
+
+  <!-- Flux voix Realtime -->
   <audio id="remoteAudio" autoplay playsinline></audio>
+
+  <!-- Intro WAV locale (plus robuste que new Audio()) -->
+  <audio id="introAudio" preload="auto" playsinline></audio>
+
   <pre id="log"></pre>
 
 <script>
@@ -24,10 +30,7 @@ const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
 const btn = document.getElementById('toggleBtn');
 const remoteAudio = document.getElementById('remoteAudio');
-
-// ► Intro WAV local
-const introAudio = new Audio('/static/intro.wav'); // place ton fichier ici
-introAudio.preload = 'auto';
+const introEl = document.getElementById('introAudio');
 
 function log(m){ logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; console.log(m); }
 function setStatus(s){ statusEl.textContent = s; }
@@ -35,6 +38,13 @@ function uiSet(on){
   if(on){ btn.textContent='ON'; btn.classList.add('on'); btn.classList.remove('off'); }
   else  { btn.textContent='OFF'; btn.classList.add('off'); btn.classList.remove('on'); }
 }
+
+/* --------- Détection chemin intro.wav ---------
+   - Si index.html est servi depuis /static/index.html => 'intro.wav'
+   - Si jamais tu sers depuis / (template), utilise '/static/intro.wav' */
+const inStatic = location.pathname.startsWith('/static/');
+introEl.src = inStatic ? 'intro.wav' : '/static/intro.wav';
+introEl.addEventListener('error', ()=>log('[intro] load/play error'));
 
 let pc=null, micStream=null, dataChannel=null;
 let session=null;
@@ -51,14 +61,14 @@ async function fetchSession(){
 function once(target, event){
   return new Promise(res=>{
     const h = (...a)=>{ target.removeEventListener(event, h); res(...a); };
-    target.addEventListener(event, h);
+    target.addEventListener(event, h, { once:true });
   });
 }
 
 async function playIntroWav(){
   try{
-    await introAudio.play();            // démarrage (nécessite un clic utilisateur -> OK)
-    await once(introAudio, 'ended');    // on attend la fin pour éviter le chevauchement de voix
+    await introEl.play();            // nécessite un clic (OK, on clique le bouton)
+    await once(introEl, 'ended');    // attend la fin
   }catch(e){
     log('[intro] échec lecture: '+(e?.message||e));
   }
@@ -89,8 +99,8 @@ async function startArthuron(){
   dataChannel = pc.createDataChannel('oai-events');
   dataChannel.onopen = ()=>{
     log('[dc] open');
-    // ► Conserver persona/voix SANS intro
-    const instructions = session?.persona || "Tu es Arthuron.";
+    // ✅ Persona + voix conservées (PAS d'intro Realtime)
+    const instructions = session?.persona || "Tu es Arthuron, vieux banc fatigué de Saint-Denis.";
     dataChannel.send(JSON.stringify({
       type: "session.update",
       session: { instructions, voice: voiceFromSession }
@@ -149,7 +159,8 @@ socket.on('state_update', async (st)=>{
   if(changing) return;
   try{
     changing = true;
-    if(wantOn && !running) await startArthuron();  // pas d’intro ici -> évite double lecture sur clients passifs
+    // Pas d'intro ici (évite double lecture sur clients passifs)
+    if(wantOn && !running) await startArthuron();
     if(!wantOn && running)  stopArthuron();
   }catch(e){
     log('Erreur synchro: '+(e?.message||e));
@@ -158,7 +169,7 @@ socket.on('state_update', async (st)=>{
   }
 });
 
-/* ---------- Clic utilisateur : ON joue l’intro WAV PUIS on start ---------- */
+/* ---------- Clic utilisateur : Intro WAV PUIS connexion ---------- */
 btn.addEventListener('click', async ()=>{
   const goingOn = (btn.textContent.trim() === 'OFF'); // cible = ON ?
   uiSet(goingOn);
@@ -167,8 +178,8 @@ btn.addEventListener('click', async ()=>{
     if(!changing){
       changing = true;
       if(goingOn && !running){
-        await playIntroWav();          // ← intro simple en WAV
-        await startArthuron();         // ← ensuite seulement on connecte le Realtime
+        await playIntroWav();          // ← intro simple en WAV local
+        await startArthuron();         // ← ensuite on connecte Realtime (persona/voice OK)
       }
       if(!goingOn && running){
         stopArthuron();
@@ -180,7 +191,7 @@ btn.addEventListener('click', async ()=>{
     changing = false;
   }
 
-  // Informe le serveur (synchro autres clients)
+  // Informe le serveur pour synchro multi-clients
   try{
     const r = await fetch('/state', {
       method:'POST',
