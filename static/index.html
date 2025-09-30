@@ -4,14 +4,19 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Arthuron AutoStart avec Persona</title>
+<style>
+  body { background:#0b0b10; color:white; font-family:sans-serif; }
+  #log { background:#111; color:#0f0; padding:10px; height:220px; overflow:auto; }
+  .muted { opacity:0.7 }
+</style>
 </head>
-<body style="background:#0b0b10; color:white; font-family:sans-serif;">
+<body>
   <h1>Arthuron AutoStart</h1>
   <p>Status: <span id="status">prêt</span></p>
   <audio id="remoteAudio" autoplay></audio>
   <audio id="introAudio" src="/static/intro.wav" preload="auto" playsinline></audio>
-<button id="startBtn" style="display:none; margin-top:10px;">Lancer</button>
-<pre id="log" style="background:#111; color:#0f0; padding:10px; height:200px; overflow:auto;"></pre>
+  <pre id="log"></pre>
+
 <script>
 const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
@@ -21,6 +26,74 @@ function setStatus(s){ statusEl.textContent = s; }
 let pc, micStream, dataChannel, session = null;
 let introPlaying = false;
 
+// ---------- REC MIX (micro + remote) ----------
+let recCtx, recDest, recMediaRecorder, recChunks = [];
+let recording = false;
+
+function pickRecorderMime() {
+  const c = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus'
+  ];
+  for (const m of c) { if (MediaRecorder.isTypeSupported(m)) return m; }
+  return '';
+}
+
+async function initRecording() {
+  if (recording) return;
+  const remoteEl = document.getElementById('remoteAudio');
+  if (!remoteEl?.srcObject) { console.warn('[rec] pas de remote stream'); return; }
+  if (!micStream) { console.warn('[rec] pas de micStream'); return; }
+
+  recCtx = new (window.AudioContext || window.webkitAudioContext)();
+  recDest = recCtx.createMediaStreamDestination();
+
+  const micSrc    = recCtx.createMediaStreamSource(micStream);
+  const remoteSrc = recCtx.createMediaStreamSource(remoteEl.srcObject);
+
+  const micGain    = recCtx.createGain();  micGain.gain.value = 1.0;
+  const remoteGain = recCtx.createGain();  remoteGain.gain.value = 1.0;
+
+  micSrc.connect(micGain).connect(recDest);
+  remoteSrc.connect(remoteGain).connect(recDest);
+
+  const mime = pickRecorderMime();
+  recMediaRecorder = new MediaRecorder(recDest.stream, { mimeType: mime });
+  recChunks = [];
+  recMediaRecorder.ondataavailable = (e)=>{ if(e.data && e.data.size>0) recChunks.push(e.data); };
+  recMediaRecorder.onstop = saveRecording;
+  recMediaRecorder.start(1000);
+  recording = true;
+  log('[rec] démarré ' + (recMediaRecorder.mimeType || mime));
+}
+
+function saveRecording() {
+  const blob = new Blob(recChunks, { type: recMediaRecorder?.mimeType || 'audio/webm' });
+  const url = URL.createObjectURL(blob);
+  const stamp = new Date().toISOString().replace(/[:.]/g,'-');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `arthuron-session-${stamp}.webm`;
+  document.body.appendChild(a);
+  a.click();
+  URL.revokeObjectURL(url);
+  a.remove();
+  log('[rec] fichier sauvegardé');
+}
+
+function stopRecording() {
+  if (!recording) return;
+  try { recMediaRecorder?.stop(); } catch {}
+  try { recCtx?.close(); } catch {}
+  recording = false;
+  log('[rec] stoppé');
+}
+
+window.addEventListener('beforeunload', () => { try { stopRecording(); } catch {} });
+
+// ---------- SESSION ----------
 async function fetchSession() {
   const r = await fetch('/session');
   const txt = await r.text();
@@ -35,25 +108,29 @@ async function startSession() {
   const model = session?.model || 'gpt-4o-mini-realtime-preview';
   if (!EPHEMERAL_KEY) { setStatus('pas de token'); return; }
 
+  const remoteEl = document.getElementById('remoteAudio');
+
   pc = new RTCPeerConnection();
   pc.onconnectionstatechange = () => log('[pc] ' + pc.connectionState);
   pc.onicecandidate = () => {};
-
-  const remoteEl = document.getElementById('remoteAudio');
-
   pc.ontrack = (e) => {
-    // On attache le flux mais on le mute si l’intro joue encore
     remoteEl.srcObject = e.streams[0];
-    remoteEl.muted = introPlaying;
+    setTimeout(() => { initRecording(); }, 100); // essai quand remote arrive
   };
 
   // Micro
   if (!micStream) {
-    micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
-    });
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
+      });
+      setTimeout(() => { initRecording(); }, 100); // essai quand micro prêt
+    } catch (err) {
+      console.error('[mic] refus/erreur:', err);
+      setStatus('micro refusé');
+    }
   }
-  micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
+  if (micStream) micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
 
   // DataChannel + persona
   dataChannel = pc.createDataChannel("oai-events");
@@ -61,6 +138,8 @@ async function startSession() {
     log('[dc] open');
     const instructions = session?.persona || "Tu es Arthuron par défaut.";
     dataChannel.send(JSON.stringify({ type:"session.update", session:{ instructions } }));
+    // Option: faire parler Arthuron dès l’ouverture (au lieu de WAV)
+    // dataChannel.send(JSON.stringify({ type:"response.create", response:{ instructions: "Bonjour, je suis Arthuron." }}));
   };
   dataChannel.onmessage = (e)=>log('[dc msg] ' + e.data);
 
@@ -83,25 +162,23 @@ async function startSession() {
   setStatus('connecté — parle près du micro');
 }
 
-// ---- Intro en parallèle + “gating” du son Realtime ----
+// ---------- INTRO en parallèle + gating remote ----------
 async function playIntroParallel() {
   const intro = document.getElementById('introAudio');
   const remoteEl = document.getElementById('remoteAudio');
   if (!intro) { log('[intro] introuvable'); return; }
 
   introPlaying = true;
-  remoteEl.muted = true;              // on coupe le flux Realtime le temps de l’intro
+  remoteEl.muted = true;
   setStatus('intro…');
 
-  // Tentatives simples (pas de bouton) :
   try {
     intro.currentTime = 0;
     intro.playsInline = true;
     intro.muted = false;
-    await intro.play();               // peut être refusé par autoplay policy
+    await intro.play();
   } catch (e1) {
     log('[intro] autoplay bloqué, on tente après getUserMedia');
-    // Après getUserMedia ça passe parfois mieux
     try {
       if (!micStream) {
         micStream = await navigator.mediaDevices.getUserMedia({
@@ -113,7 +190,6 @@ async function playIntroParallel() {
       await intro.play();
     } catch (e2) {
       log('[intro] encore bloqué: ' + e2);
-      // Rien ne marche: on arrête proprement et on libère l’audio Realtime
       introPlaying = false;
       remoteEl.muted = false;
       setStatus('intro bloquée (autoplay). Session en cours.');
@@ -122,9 +198,7 @@ async function playIntroParallel() {
   }
 
   intro.addEventListener('ended', () => {
-    // Fin de l’intro -> on ouvre le son Realtime
     introPlaying = false;
-    // Option: petit fondu si le navigateur supporte volume
     try {
       let v = 0.0;
       remoteEl.muted = false;
@@ -143,11 +217,10 @@ async function playIntroParallel() {
   }, { once:true });
 }
 
-// ---- Boot simultané ----
+// ---------- Boot simultané ----------
 window.addEventListener('load', async () => {
-  // démarrage simultané
-  playIntroParallel();     // ne bloque pas
-  startSession().catch(e => log('[session] échec: ' + e));
+  playIntroParallel();                   // lance l’intro
+  startSession().catch(e => log('[session] échec: ' + e));  // démarre la session
 });
 </script>
 </body>
