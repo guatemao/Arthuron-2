@@ -10,7 +10,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REALTIME_MODEL = os.getenv("REALTIME_MODEL", "gpt-4o-mini-realtime-preview")
 REALTIME_VOICE = os.getenv("REALTIME_VOICE", "ash")
 
-app = Flask(__name__, static_folder=STATIC_DIR)
+# static_url_path garantit /static/... propre
+app = Flask(__name__, static_folder=STATIC_DIR, static_url_path="/static")
 app.url_map.strict_slashes = False
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -23,21 +24,22 @@ def load_persona():
         with open(p, "r", encoding="utf-8") as f:
             return f.read().strip()
     except Exception:
+        # Fallback court si persona.txt absent
         return "Tu es Arthuron, vieux banc fatigué de Saint-Denis."
 
 @app.route("/")
 def index():
-    # si tu utilises templates, renvoie render_template(...)
+    # Sert /static/index.html si tu l’y as mis
     return send_from_directory(STATIC_DIR, "index.html")
 
-@app.route("/static/<path:fn>")
-def static_files(fn):
-    return send_from_directory(STATIC_DIR, fn)
+# /static/* est déjà servi par Flask grâce à static_url_path
 
 @app.route("/session")
 def session():
-    # Ici tu dois appeler ton backend qui crée la clé éphémère côté OpenAI.
-    # Pour l’exemple: faux token court (remplace par ton vrai flux d’ephemeral key).
+    """
+    ⚠️ Tu dois remplacer ce faux token par la création
+    d'une vraie clé éphémère côté serveur.
+    """
     ephemeral = {
         "id": f"eph_{int(time.time())}",
         "value": secrets.token_urlsafe(24)
@@ -47,7 +49,7 @@ def session():
         "client_secret": ephemeral,
         "model": REALTIME_MODEL,
         "voice": REALTIME_VOICE,
-        "persona": load_persona()
+        "persona": load_persona()  # ← persona chargée à chaque session
     })
 
 @app.route("/state", methods=["POST"])
@@ -60,6 +62,11 @@ def set_state():
     socketio.emit("state_update", {"status": status})
     return jsonify({"ok": True})
 
+# Optionnel: GET /state utile pour debug/UI
+@app.route("/state", methods=["GET"])
+def get_state():
+    return jsonify({"status": STATE["status"]})
+
 @socketio.on("connect")
 def on_connect():
     emit("state_update", {"status": STATE["status"]})
@@ -67,4 +74,3 @@ def on_connect():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5050"))
     socketio.run(app, host="0.0.0.0", port=port)
-
