@@ -218,6 +218,13 @@ def tts_flush():
     except Exception as e:
         print("[/tts/flush] EXC", e)
         return {"ok": False, "error": str(e)}, 500
+@app.get("/health")
+def health():
+    return {
+        "openai_key": bool(os.getenv("OPENAI_API_KEY")),
+        "el_key": bool(os.getenv("ELEVEN_API_KEY")),
+        "voice": bool(os.getenv("ELEVEN_VOICE_ID")),
+    }
 
 @app.get("/tts/stream.mp3")
 def tts_stream():
