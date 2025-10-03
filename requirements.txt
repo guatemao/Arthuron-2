@@ -5,3 +5,4 @@ python-dotenv
 gunicorn
 requests
 websockets
+websockets==12.0
