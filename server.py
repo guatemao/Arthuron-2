@@ -1,27 +1,50 @@
 import os, requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
 
-ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY")     # mets ça dans Render env vars
-ELEVEN_AGENT_ID = os.getenv("ELEVEN_AGENT_ID")   # l’ID de ton agent
+# --- Config ---
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-app = Flask(__name__)
+ELEVEN_API_KEY  = os.getenv("ELEVEN_API_KEY")   # DOIT être défini dans Render
+ELEVEN_AGENT_ID = os.getenv("ELEVEN_AGENT_ID")  # format ag_..., depuis le Dashboard Agents
+
+app = Flask(__name__, static_folder=STATIC_DIR)
 CORS(app)
 
+# --- Static / index ---
+@app.get("/")
+def index():
+    return send_from_directory(STATIC_DIR, "index.html")
+
+@app.get("/static/<path:path>")
+def static_proxy(path):
+    return send_from_directory(STATIC_DIR, path)
+
+# --- Health pour vérifier rapidement ---
+@app.get("/health")
+def health():
+    return {
+        "el_key": bool(ELEVEN_API_KEY),
+        "agent_id": bool(ELEVEN_AGENT_ID),
+    }
+
+# --- SIGNED URL Eleven Agents (la route qui te manque) ---
 @app.get("/signed-url")
-def signed_url():
+def get_signed_url():
     if not ELEVEN_API_KEY or not ELEVEN_AGENT_ID:
-        return jsonify({"error":"missing ELEVEN_API_KEY or ELEVEN_AGENT_ID"}), 500
+        return jsonify({"error": "Missing ELEVEN_API_KEY or ELEVEN_AGENT_ID"}), 500
+
     r = requests.get(
         "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url",
         params={"agent_id": ELEVEN_AGENT_ID},
         headers={"xi-api-key": ELEVEN_API_KEY},
-        timeout=10
+        timeout=10,
     )
     if r.status_code >= 300:
-        return jsonify({"status": r.status_code, "body": r.text}), 500
-    return jsonify(r.json())  # { "signed_url": "wss://api.elevenlabs.io/v1/convai/conversation?agent_id=...&conversation_signature=..." }
+        return jsonify({"status": r.status_code, "body": r.text}), 502
+
+    return jsonify(r.json())  # { "signed_url": "wss://..." }
 
 if __name__ == "__main__":
-    app.run("0.0.0.0", 5050)
-
+    app.run("0.0.0.0", int(os.getenv("PORT", "5050")), debug=False)
