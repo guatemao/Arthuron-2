@@ -1,24 +1,23 @@
 <!doctype html><meta charset="utf-8">
-<title>Selena (ElevenLabs seulement)</title>
+<title>Selena (Eleven Agents)</title>
 <body style="background:#0b0b10;color:#fff;font-family:sans-serif">
-  <h1>Selena</h1>
+  <h1>Selena — ElevenLabs seulement</h1>
   <button id="btnConnect">Connect</button>
-  <input id="msg" placeholder="Dis quelque chose à Selena" style="width:60%">
+  <input id="msg" placeholder="Parle à Selena…" style="width:60%">
   <button id="btnSend">Envoyer</button>
   <pre id="log" style="background:#111;color:#0f0;height:200px;overflow:auto;padding:8px"></pre>
   <audio id="out" autoplay></audio>
 <script>
-const log = (m)=>{const el=document.getElementById('log'); el.textContent+=m+"\\n"; el.scrollTop=el.scrollHeight;}
+const log = m => { const el = document.getElementById('log'); el.textContent += m + "\n"; el.scrollTop = el.scrollHeight; };
 
-let ws, mediaSource, sourceBuffer, queue=[];
+let ws, mediaSource, sourceBuffer, queue = [];
 
 function setupPlayer(){
   const a = document.getElementById('out');
   mediaSource = new MediaSource();
   a.src = URL.createObjectURL(mediaSource);
-  mediaSource.addEventListener('sourceopen', ()=>{
-    // Eleven renvoie typiquement du MPEG (mp3). Ajuste si différent.
-    sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+  mediaSource.addEventListener('sourceopen', () => {
+    sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg'); // mp3
     sourceBuffer.addEventListener('updateend', drain);
     drain();
   });
@@ -32,36 +31,33 @@ function drain(){
 
 async function connect(){
   const r = await fetch('/signed-url');
+  if (!r.ok){ log('signed-url HTTP '+r.status); return; }
   const j = await r.json();
-  if (!j.signed_url){ log('No signed_url'); return; }
+  if (!j.signed_url){ log('Pas de signed_url: '+JSON.stringify(j)); return; }
 
   setupPlayer();
-  ws = new WebSocket(j.signed_url);         // token signé, pas de clé en front
+  ws = new WebSocket(j.signed_url);
   ws.binaryType = 'arraybuffer';
-
-  ws.onopen = ()=>{ log('[ws] open'); };
-  ws.onerror = (e)=>{ log('[ws] error ' + (e.message||'')); };
-  ws.onclose = ()=>{ log('[ws] close'); };
-
-  ws.onmessage = (ev)=>{
+  ws.onopen  = () => log('[ws] open');
+  ws.onerror = (e) => log('[ws] error '+(e.message||'')); 
+  ws.onclose = () => log('[ws] close');
+  ws.onmessage = (ev) => {
     if (ev.data instanceof ArrayBuffer){
       queue.push(new Uint8Array(ev.data));
       drain();
     } else {
-      // JSON d’état (facultatif)
-      // log('[ws json] ' + ev.data);
+      // log('[json] ' + ev.data); // décommente pour debug
     }
   };
 }
 
 function sendText(t){
-  if (!ws || ws.readyState!==1) { log('WS pas connecté'); return; }
-  const m = { type: "user_message", text: t };   // protocole Agent
-  ws.send(JSON.stringify(m));
+  if (!ws || ws.readyState !== 1){ log('WS pas connecté'); return; }
+  ws.send(JSON.stringify({ type: "user_message", text: t }));
 }
 
 document.getElementById('btnConnect').onclick = connect;
-document.getElementById('btnSend').onclick = ()=>{
+document.getElementById('btnSend').onclick = () => {
   const v = document.getElementById('msg').value.trim();
   if (v) sendText(v);
 };
