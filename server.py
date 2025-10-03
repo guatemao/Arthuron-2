@@ -28,6 +28,12 @@ def health():
         "el_key": bool(ELEVEN_API_KEY),
         "agent_id": bool(ELEVEN_AGENT_ID),
     }
+@app.get("/health")
+def health():
+    return {
+        "el_key": bool(ELEVEN_API_KEY),
+        "agent_id": bool(ELEVEN_AGENT_ID),
+    }
 
 # --- SIGNED URL Eleven Agents (la route qui te manque) ---
 @app.get("/signed-url")
