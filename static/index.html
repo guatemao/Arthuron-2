@@ -20,7 +20,7 @@
     <button id="btnStopRec">Stop REC</button>
   </div>
 
-  <!-- TTS entrant (depuis serveur → ElevenLabs) -->
+  <!-- TTS entrant (serveur → ElevenLabs → stream MP3) -->
   <audio id="remoteAudio" autoplay></audio>
 
   <!-- Intro locale optionnelle -->
@@ -86,55 +86,61 @@ async function startSession() {
   }
   if (micStream) micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
 
-dataChannel = pc.createDataChannel("oai-events");
-dataChannel.onopen = () => {
-  log('[dc] open');
+  // ---------- DataChannel ----------
+  dataChannel = pc.createDataChannel("oai-events");
 
-  const instructions = session?.persona || "Tu es Selena.";
-  // 1) appliquer les instructions/persona
-  dataChannel.send(JSON.stringify({
-    type: "session.update",
-    session: { instructions }
-  }));
+  // onopen → set persona + demande une réponse avec input inline
+  dataChannel.onopen = () => {
+    log('[dc] open');
 
-  // 2) créer un message utilisateur (déclencheur)
-  const kick = {
-    type: "conversation.item.create",
-    item: {
-      type: "message",
-      role: "user",
-      content: [
-        { type: "input_text",
-          text: "Selena, présente-toi en 2 phrases avec ton accent brésilien et ton délire de batucada." }
-      ]
-    }
-  };
-  dataChannel.send(JSON.stringify(kick));
+    const instructions = session?.persona || "Tu es Selena.";
+    // Persona/instructions pour la session
+    dataChannel.send(JSON.stringify({
+      type: "session.update",
+      session: { instructions }
+    }));
 
-  // 3) demander une réponse TEXTE (pas d’audio OpenAI)
-  dataChannel.send(JSON.stringify({
-    type: "response.create",
-    response: { modalities: ["text"] }
-  }));
-};
-
-
-  dataChannel.onmessage = (e) => {
-    try {
-      const msg = JSON.parse(e.data);
-      if (msg.type === "response.output_text.delta") {
-        const chunk = (msg.delta || "").trim();
-        if (chunk) ttsChunk(chunk);
-      } else if (msg.type === "response.completed") {
-        ttsFlush();
+    // Demande UNE réponse avec l'input inline (évite le cas où l'item serait ignoré)
+    dataChannel.send(JSON.stringify({
+      type: "response.create",
+      response: {
+        modalities: ["text"],
+        input: [
+          {
+            role: "user",
+            content: [
+              { type: "input_text",
+                text: "Selena, présente-toi en 2 phrases avec ton accent brésilien et ton délire de batucada." }
+            ]
+          }
+        ]
       }
-      // log('[dc msg] ' + e.data); // debug si besoin
-    } catch {
-      // non-JSON → ignore
-    }
+    }));
   };
 
-  // SDP
+  // onmessage → capter toutes les variantes de deltas + erreurs
+  dataChannel.onmessage = (e) => {
+    let msg;
+    try { msg = JSON.parse(e.data); } catch { return; }
+
+    if (msg.type === "error") {
+      log("[oai error] " + (msg.error?.message || JSON.stringify(msg)));
+      return;
+    }
+
+    if (msg.type === "response.output_text.delta" || msg.type === "response.delta") {
+      const chunk =
+        (typeof msg.delta === "string" ? msg.delta : "") ||
+        (typeof msg.output_text === "string" ? msg.output_text : "");
+      const piece = (chunk || "").trim();
+      if (piece) ttsChunk(piece);
+    } else if (msg.type === "response.completed") {
+      ttsFlush();
+    }
+    // log('[dc msg] ' + e.data); // décommente si besoin
+  };
+
+  // ---------- SDP ----------
   const offer = await pc.createOffer({ offerToReceiveAudio:false });
   await pc.setLocalDescription(offer);
   const sdpResponse = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
@@ -173,7 +179,6 @@ document.getElementById("btnStart").addEventListener("click", async () => {
 });
 
 document.getElementById("btnStopRec").addEventListener("click", () => {
-  // Si tu veux rajouter un enregistrement local (MediaRecorder), branche-le ici.
   log('[rec] (stub) — ajoute ta logique si besoin');
 });
 </script>
