@@ -3,4 +3,5 @@ flask-cors
 openai
 python-dotenv
 gunicorn
-requests>=2.32
+requests
+websockets
