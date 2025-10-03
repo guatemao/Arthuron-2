@@ -225,6 +225,15 @@ def health():
         "el_key": bool(os.getenv("ELEVEN_API_KEY")),
         "voice": bool(os.getenv("ELEVEN_VOICE_ID")),
     }
+@app.get("/diag")
+def diag():
+    out = []
+    try:
+        while True:
+            out.append(ctrl_queue.get_nowait())
+    except queue.Empty:
+        pass
+    return {"lines": out[-50:]}
 
 @app.get("/tts/stream.mp3")
 def tts_stream():
