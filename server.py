@@ -15,8 +15,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REALTIME_MODEL = os.getenv("REALTIME_MODEL", "gpt-4o-mini-realtime-preview")
 PORT = int(os.getenv("PORT", "5050"))
 
-ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY", "")
-ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "")  # ex: 7eUAxNOneHxqfyRS77mW
+ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY", "499f1e03920aaced255f33c8867054f064d9ef62e8bb75797350bf0c2adde4dd")
+ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "7eUAxNOneHxqfyRS77mW")  # ex: 7eUAxNOneHxqfyRS77mW
 ELEVEN_MODEL_ID = os.getenv("ELEVEN_MODEL_ID", "eleven_flash_v2_5")
 ELEVEN_LATENCY = int(os.getenv("ELEVEN_LATENCY", "2"))  # 0-4
 ELEVEN_FORMAT = os.getenv("ELEVEN_FORMAT", "mp3_44100_128")  # ou pcm_16000
