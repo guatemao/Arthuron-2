@@ -8,59 +8,158 @@
   body { background:#0b0b10; color:white; font-family:sans-serif; }
   #log { background:#111; color:#0f0; padding:10px; height:220px; overflow:auto; }
   .muted { opacity:0.7 }
+  button { background:#1f2937; color:#fff; border:0; padding:8px 12px; border-radius:8px; }
+  button + button { margin-left:8px; }
 </style>
 </head>
 <body>
   <h1>Selena AutoStart</h1>
   <p>Status: <span id="status">prêt</span></p>
+  <div>
+    <button id="btnStart">Démarrer</button>
+    <button id="btnStopRec">Stop REC</button>
+  </div>
   <audio id="remoteAudio" autoplay></audio>
   <audio id="introAudio" src="/static/intro.wav" preload="auto" playsinline></audio>
   <pre id="log"></pre>
 
 <script>
+/* ======================= CONFIG ======================= */
+const EL_VOICE_ID = "7eUAxNOneHxqfyRS77mW"; // ta voix pt-BR
+// Mets ta clé via localStorage pour éviter de l'écrire en dur :
+const EL_API_KEY = localStorage.getItem("EL_API_KEY") || "ELEVEN_API_KEY_ICI"; // ⚠️ clé exposée côté client (OK tests LAN)
+const EL_MODEL   = "eleven_flash_v2_5";
+const EL_LATENCY = 2; // 0-4
+const EL_FMT     = "mp3_44100_128"; // simple à jouer via MediaSource
+
+/* ======================= LOG UI ======================= */
 const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
 function log(msg){ logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; console.log(msg); }
 function setStatus(s){ statusEl.textContent = s; }
 
+/* ======================= GLOBALS ======================= */
 let pc, micStream, dataChannel, session = null;
 let introPlaying = false;
 
-// ---------- REC MIX (micro + remote) ----------
+// Recording mix (mic + TTS)
 let recCtx, recDest, recMediaRecorder, recChunks = [];
 let recording = false;
 
 function pickRecorderMime() {
-  const c = [
-    'audio/webm;codecs=opus',
-    'audio/webm',
-    'audio/mp4',
-    'audio/ogg;codecs=opus'
-  ];
+  const c = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
   for (const m of c) { if (MediaRecorder.isTypeSupported(m)) return m; }
   return '';
 }
 
+/* ======================= ElevenLabs WS + Player ======================= */
+let elWs = null;
+let mediaSource = null;
+let sourceBuffer = null;
+let queue = []; // file d'ArrayBuffer à pousser quand sourceBuffer prêt
+
+function setupPlayer() {
+  const audioEl = document.getElementById("remoteAudio");
+  mediaSource = new MediaSource();
+  audioEl.src = URL.createObjectURL(mediaSource);
+  mediaSource.addEventListener("sourceopen", () => {
+    sourceBuffer = mediaSource.addSourceBuffer("audio/mpeg"); // mp3
+    sourceBuffer.addEventListener("updateend", drainQueue);
+    drainQueue();
+  });
+}
+
+function drainQueue() {
+  if (!sourceBuffer || sourceBuffer.updating) return;
+  if (queue.length === 0) return;
+  const chunk = queue.shift();
+  try {
+    sourceBuffer.appendBuffer(chunk);
+  } catch (e) {
+    log("[EL] append fail: " + e);
+  }
+}
+
+async function openElevenWs() {
+  if (!EL_API_KEY || EL_API_KEY === "ELEVEN_API_KEY_ICI") {
+    log("⚠️ Mets ta clé ElevenLabs : localStorage.setItem('EL_API_KEY','eleven-xxxx');");
+  }
+  const url = `wss://api.elevenlabs.io/v1/text-to-speech/${EL_VOICE_ID}/stream-input`;
+  elWs = new WebSocket(url);
+  elWs.binaryType = "arraybuffer";
+
+  elWs.onopen = () => {
+    log("[EL] open");
+    const init = {
+      text: "",
+      model_id: EL_MODEL,
+      output_format: EL_FMT,
+      optimize_streaming_latency: EL_LATENCY,
+      voice_settings: { stability: 0.4, similarity_boost: 0.7 }
+    };
+    elWs.send(JSON.stringify(init));
+    // Auth par header normalement; ici pas possible en browser → on utilise "set-authorization" message
+    // (fallback accepté côté EL Agents/stream-input). Si non supporté chez toi, passe par proxy Flask.
+    try {
+      elWs.send(JSON.stringify({ set_api_key: EL_API_KEY })); // certains tenants acceptent, selon plan; sinon proxy.
+    } catch {}
+  };
+
+  elWs.onmessage = (evt) => {
+    if (evt.data instanceof ArrayBuffer) {
+      const arr = new Uint8Array(evt.data);
+      queue.push(arr);
+      drainQueue();
+    } else {
+      // JSON d’état
+      // log("[EL] msg " + evt.data);
+    }
+  };
+  elWs.onerror = (e) => log("[EL] error " + e.message);
+  elWs.onclose  = () => log("[EL] close");
+}
+
+function sendToElevenLabs(text) {
+  if (!elWs || elWs.readyState !== 1) return;
+  elWs.send(JSON.stringify({ text, try_trigger_generation: true }));
+}
+function flushElevenLabs() {
+  if (!elWs || elWs.readyState !== 1) return;
+  elWs.send(JSON.stringify({ flush: true }));
+}
+
+/* ======================= Recording mix (mic+TTS) ======================= */
 async function initRecording() {
   if (recording) return;
   const remoteEl = document.getElementById('remoteAudio');
-  if (!remoteEl?.srcObject) { console.warn('[rec] pas de remote stream'); return; }
+  if (!remoteEl?.srcObject && !mediaSource) { /* on lit MediaSource → pas de srcObject */ }
   if (!micStream) { console.warn('[rec] pas de micStream'); return; }
 
   recCtx = new (window.AudioContext || window.webkitAudioContext)();
   recDest = recCtx.createMediaStreamDestination();
 
-  const micSrc    = recCtx.createMediaStreamSource(micStream);
-  const remoteSrc = recCtx.createMediaStreamSource(remoteEl.srcObject);
-
-  const micGain    = recCtx.createGain();  micGain.gain.value = 1.0;
-  const remoteGain = recCtx.createGain();  remoteGain.gain.value = 1.0;
-
+  const micSrc = recCtx.createMediaStreamSource(micStream);
+  const micGain = recCtx.createGain();  micGain.gain.value = 1.0;
   micSrc.connect(micGain).connect(recDest);
-  remoteSrc.connect(remoteGain).connect(recDest);
+
+  // Pour TTS, on enregistre la sortie audioEl via captureStream si supporté
+  const audioEl = document.getElementById('remoteAudio');
+  let ttsStream = null;
+  if (audioEl.captureStream) {
+    ttsStream = audioEl.captureStream();
+  } else if (audioEl.mozCaptureStream) {
+    ttsStream = audioEl.mozCaptureStream();
+  }
+  if (ttsStream) {
+    const ttsSrc = recCtx.createMediaStreamSource(ttsStream);
+    const ttsGain = recCtx.createGain(); ttsGain.gain.value = 1.0;
+    ttsSrc.connect(ttsGain).connect(recDest);
+  } else {
+    log("[rec] pas de captureStream sur <audio>, tu n'auras que le micro dans l'enregistrement.");
+  }
 
   const mime = pickRecorderMime();
-  recMediaRecorder = new MediaRecorder(recDest.stream, { mimeType: mime });
+  recMediaRecorder = new MediaRecorder(recDest.stream, { mimeType: mime || undefined });
   recChunks = [];
   recMediaRecorder.ondataavailable = (e)=>{ if(e.data && e.data.size>0) recChunks.push(e.data); };
   recMediaRecorder.onstop = saveRecording;
@@ -75,14 +174,13 @@ function saveRecording() {
   const stamp = new Date().toISOString().replace(/[:.]/g,'-');
   const a = document.createElement('a');
   a.href = url;
-  a.download = `arthuron-session-${stamp}.webm`;
+  a.download = `selena-session-${stamp}.webm`;
   document.body.appendChild(a);
   a.click();
   URL.revokeObjectURL(url);
   a.remove();
   log('[rec] fichier sauvegardé');
 }
-
 function stopRecording() {
   if (!recording) return;
   try { recMediaRecorder?.stop(); } catch {}
@@ -91,9 +189,7 @@ function stopRecording() {
   log('[rec] stoppé');
 }
 
-window.addEventListener('beforeunload', () => { try { stopRecording(); } catch {} });
-
-// ---------- SESSION ----------
+/* ======================= OpenAI Realtime (texte only) ======================= */
 async function fetchSession() {
   const r = await fetch('/session');
   const txt = await r.text();
@@ -108,15 +204,11 @@ async function startSession() {
   const model = session?.model || 'gpt-4o-mini-realtime-preview';
   if (!EPHEMERAL_KEY) { setStatus('pas de token'); return; }
 
-  const remoteEl = document.getElementById('remoteAudio');
-
   pc = new RTCPeerConnection();
   pc.onconnectionstatechange = () => log('[pc] ' + pc.connectionState);
   pc.onicecandidate = () => {};
-  pc.ontrack = (e) => {
-    remoteEl.srcObject = e.streams[0];
-    setTimeout(() => { initRecording(); }, 100); // essai quand remote arrive
-  };
+  // NOTE: on ne s'attend PAS à recevoir d'audio d’OpenAI (texte only)
+  pc.ontrack = (e) => { /* ignoré */ };
 
   // Micro
   if (!micStream) {
@@ -124,7 +216,6 @@ async function startSession() {
       micStream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
       });
-      setTimeout(() => { initRecording(); }, 100); // essai quand micro prêt
     } catch (err) {
       console.error('[mic] refus/erreur:', err);
       setStatus('micro refusé');
@@ -136,15 +227,34 @@ async function startSession() {
   dataChannel = pc.createDataChannel("oai-events");
   dataChannel.onopen = () => {
     log('[dc] open');
-    const instructions = session?.persona || "Tu es Arthuron par défaut.";
+    const instructions = session?.persona || "Tu es Selena.";
+    // on pousse la persona
     dataChannel.send(JSON.stringify({ type:"session.update", session:{ instructions } }));
-    // Option: faire parler Arthuron dès l’ouverture (au lieu de WAV)
-    // dataChannel.send(JSON.stringify({ type:"response.create", response:{ instructions: "Bonjour, je suis Arthuron." }}));
+    // IMPORTANT: demander des réponses TEXTE uniquement (pas d'audio)
+    dataChannel.send(JSON.stringify({
+      type: "response.create",
+      response: { modalities: ["text"], instructions: "Parle comme Selena (accent brésilien, batucada, coquine)." }
+    }));
   };
-  dataChannel.onmessage = (e)=>log('[dc msg] ' + e.data);
+
+  dataChannel.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "response.output_text.delta") {
+        const chunk = (msg.delta || "").trim();
+        if (chunk) sendToElevenLabs(chunk);
+      } else if (msg.type === "response.completed") {
+        flushElevenLabs();
+      }
+      // log tout pour debug si tu veux :
+      // log('[dc msg] ' + e.data);
+    } catch {
+      // non-JSON → ignore
+    }
+  };
 
   // SDP
-  const offer = await pc.createOffer({ offerToReceiveAudio:true });
+  const offer = await pc.createOffer({ offerToReceiveAudio:false }); // pas d'audio attendu
   await pc.setLocalDescription(offer);
   const sdpResponse = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
     method:"POST",
@@ -160,16 +270,19 @@ async function startSession() {
   const answer = { type:"answer", sdp: await sdpResponse.text() };
   await pc.setRemoteDescription(answer);
   setStatus('connecté — parle près du micro');
+
+  // Démarre l’enregistrement mix (mic + TTS)
+  setTimeout(() => { initRecording(); }, 300);
 }
 
-// ---------- INTRO en parallèle + gating remote ----------
+/* ======================= Intro WAV + gating ======================= */
 async function playIntroParallel() {
   const intro = document.getElementById('introAudio');
-  const remoteEl = document.getElementById('remoteAudio');
+  const audioEl = document.getElementById('remoteAudio');
   if (!intro) { log('[intro] introuvable'); return; }
 
   introPlaying = true;
-  remoteEl.muted = true;
+  audioEl.muted = true;
   setStatus('intro…');
 
   try {
@@ -191,7 +304,7 @@ async function playIntroParallel() {
     } catch (e2) {
       log('[intro] encore bloqué: ' + e2);
       introPlaying = false;
-      remoteEl.muted = false;
+      audioEl.muted = false;
       setStatus('intro bloquée (autoplay). Session en cours.');
       return;
     }
@@ -201,28 +314,35 @@ async function playIntroParallel() {
     introPlaying = false;
     try {
       let v = 0.0;
-      remoteEl.muted = false;
-      remoteEl.volume = 0.0;
+      audioEl.muted = false;
+      audioEl.volume = 0.0;
       const step = () => {
         v += 0.1;
-        if (v >= 1) { remoteEl.volume = 1.0; return; }
-        remoteEl.volume = v;
+        if (v >= 1) { audioEl.volume = 1.0; return; }
+        audioEl.volume = v;
         requestAnimationFrame(step);
       };
       requestAnimationFrame(step);
     } catch {
-      remoteEl.muted = false;
+      audioEl.muted = false;
     }
     setStatus('connecté — parle près du micro');
   }, { once:true });
 }
 
-// ---------- Boot simultané ----------
-window.addEventListener('load', async () => {
-  playIntroParallel();                   // lance l’intro
-  startSession().catch(e => log('[session] échec: ' + e));  // démarre la session
+/* ======================= Boot ======================= */
+document.getElementById("btnStart").addEventListener("click", async () => {
+  setupPlayer();          // prépare MediaSource
+  await openElevenWs();   // ouvre le WS ElevenLabs (reçoit l’audio)
+  playIntroParallel();    // lance l’intro
+  startSession().catch(e => log('[session] échec: ' + e));
 });
+
+document.getElementById("btnStopRec").addEventListener("click", () => stopRecording());
+
+window.addEventListener('beforeunload', () => { try { stopRecording(); } catch {} });
 </script>
 </body>
 </html>
+
 
