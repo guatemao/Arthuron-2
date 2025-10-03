@@ -81,8 +81,8 @@ function drainQueue() {
 }
 
 async function openElevenWs() {
-  if (!EL_API_KEY || EL_API_KEY === "ELEVEN_API_KEY_ICI") {
-    log("⚠️ Mets ta clé ElevenLabs : localStorage.setItem('EL_API_KEY','eleven-xxxx');");
+  if (!EL_API_KEY || EL_API_KEY === "499f1e03920aaced255f33c8867054f064d9ef62e8bb75797350bf0c2adde4dd") {
+    log("⚠️ Mets ta clé ElevenLabs : localStorage.setItem('EL_API_KEY','eleven-499f1e03920aaced255f33c8867054f064d9ef62e8bb75797350bf0c2adde4dd');");
   }
   const url = `wss://api.elevenlabs.io/v1/text-to-speech/${EL_VOICE_ID}/stream-input`;
   elWs = new WebSocket(url);
