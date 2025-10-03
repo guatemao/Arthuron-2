@@ -86,17 +86,38 @@ async function startSession() {
   }
   if (micStream) micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
 
-  // DataChannel -> on pousse persona, et on demande du TEXTE
-  dataChannel = pc.createDataChannel("oai-events");
-  dataChannel.onopen = () => {
-    log('[dc] open');
-    const instructions = session?.persona || "Tu es Selena.";
-    dataChannel.send(JSON.stringify({ type:"session.update", session:{ instructions } }));
-    dataChannel.send(JSON.stringify({
-      type: "response.create",
-      response: { modalities: ["text"], instructions: "Parle comme Selena (accent brésilien, batucada, coquine)." }
-    }));
+dataChannel = pc.createDataChannel("oai-events");
+dataChannel.onopen = () => {
+  log('[dc] open');
+
+  const instructions = session?.persona || "Tu es Selena.";
+  // 1) appliquer les instructions/persona
+  dataChannel.send(JSON.stringify({
+    type: "session.update",
+    session: { instructions }
+  }));
+
+  // 2) créer un message utilisateur (déclencheur)
+  const kick = {
+    type: "conversation.item.create",
+    item: {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text",
+          text: "Selena, présente-toi en 2 phrases avec ton accent brésilien et ton délire de batucada." }
+      ]
+    }
   };
+  dataChannel.send(JSON.stringify(kick));
+
+  // 3) demander une réponse TEXTE (pas d’audio OpenAI)
+  dataChannel.send(JSON.stringify({
+    type: "response.create",
+    response: { modalities: ["text"] }
+  }));
+};
+
 
   dataChannel.onmessage = (e) => {
     try {
