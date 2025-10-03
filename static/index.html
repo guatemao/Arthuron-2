@@ -1,189 +1,72 @@
-<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Selena AutoStart avec Persona</title>
-<style>
-  body { background:#0b0b10; color:white; font-family:sans-serif; }
-  #log { background:#111; color:#0f0; padding:10px; height:220px; overflow:auto; white-space:pre-wrap; }
-  .muted { opacity:0.7 }
-  button { background:#1f2937; color:#fff; border:0; padding:8px 12px; border-radius:8px; }
-  button + button { margin-left:8px; }
-</style>
-</head>
-<body>
-  <h1>Selena AutoStart</h1>
-  <p>Status: <span id="status">prêt</span></p>
-  <div>
-    <button id="btnStart">Démarrer</button>
-    <button id="btnStopRec">Stop REC</button>
-  </div>
-
-  <!-- TTS entrant (serveur → ElevenLabs → stream MP3) -->
-  <audio id="remoteAudio" autoplay></audio>
-
-  <!-- Intro locale optionnelle -->
-  <audio id="introAudio" src="/static/intro.wav" preload="auto" playsinline></audio>
-
-  <pre id="log"></pre>
-
+<!doctype html><meta charset="utf-8">
+<title>Selena (ElevenLabs seulement)</title>
+<body style="background:#0b0b10;color:#fff;font-family:sans-serif">
+  <h1>Selena</h1>
+  <button id="btnConnect">Connect</button>
+  <input id="msg" placeholder="Dis quelque chose à Selena" style="width:60%">
+  <button id="btnSend">Envoyer</button>
+  <pre id="log" style="background:#111;color:#0f0;height:200px;overflow:auto;padding:8px"></pre>
+  <audio id="out" autoplay></audio>
 <script>
-/* ======================= LOG UI ======================= */
-const statusEl = document.getElementById('status');
-const logEl = document.getElementById('log');
-function log(msg){ logEl.textContent += msg + "\n"; logEl.scrollTop = logEl.scrollHeight; console.log(msg); }
-function setStatus(s){ statusEl.textContent = s; }
+const log = (m)=>{const el=document.getElementById('log'); el.textContent+=m+"\\n"; el.scrollTop=el.scrollHeight;}
 
-/* ======================= GLOBALS ======================= */
-let pc, micStream, dataChannel, session = null;
+let ws, mediaSource, sourceBuffer, queue=[];
 
-/* ======================= TTS HTTP stream ======================= */
-function startAudioStream() {
-  const audioEl = document.getElementById("remoteAudio");
-  audioEl.src = "/tts/stream.mp3";   // stream chunked mp3 servi par le serveur
-  audioEl.play().catch(e => log("[audio] autoplay bloqué: " + e));
-}
-async function ttsChunk(text){
-  try {
-    await fetch('/tts/chunk', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text}) });
-  } catch(e) { log('[tts/chunk] ' + e); }
-}
-async function ttsFlush(){
-  try {
-    await fetch('/tts/flush', { method:'POST' });
-  } catch(e) { log('[tts/flush] ' + e); }
-}
-
-/* ======================= OpenAI Realtime (texte only) ======================= */
-async function fetchSession() {
-  const r = await fetch('/session');
-  const txt = await r.text();
-  try { return JSON.parse(txt); }
-  catch(e){ console.error('SESSION BODY:', txt); throw e; }
-}
-
-async function startSession() {
-  setStatus('initialisation…');
-  session = await fetchSession();
-  const EPHEMERAL_KEY = session?.client_secret?.value;
-  const model = session?.model || 'gpt-4o-mini-realtime-preview';
-  if (!EPHEMERAL_KEY) { setStatus('pas de token'); return; }
-
-  pc = new RTCPeerConnection();
-  pc.onconnectionstatechange = () => log('[pc] ' + pc.connectionState);
-
-  // micro (pour VAD/événements si besoin)
-  if (!micStream) {
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
-      });
-    } catch (err) {
-      console.error('[mic] refus/erreur:', err);
-      setStatus('micro refusé');
-    }
-  }
-  if (micStream) micStream.getTracks().forEach(t => pc.addTrack(t, micStream));
-
-  // ---------- DataChannel ----------
-  dataChannel = pc.createDataChannel("oai-events");
-
-  // onopen → set persona + demande une réponse avec input inline
-  dataChannel.onopen = () => {
-    log('[dc] open');
-
-    const instructions = session?.persona || "Tu es Selena.";
-    // Persona/instructions pour la session
-    dataChannel.send(JSON.stringify({
-      type: "session.update",
-      session: { instructions }
-    }));
-
-    // Demande UNE réponse avec l'input inline (évite le cas où l'item serait ignoré)
-    dataChannel.send(JSON.stringify({
-      type: "response.create",
-      response: {
-        modalities: ["text"],
-        input: [
-          {
-            role: "user",
-            content: [
-              { type: "input_text",
-                text: "Selena, présente-toi en 2 phrases avec ton accent brésilien et ton délire de batucada." }
-            ]
-          }
-        ]
-      }
-    }));
-  };
-
-  // onmessage → capter toutes les variantes de deltas + erreurs
-  dataChannel.onmessage = (e) => {
-    let msg;
-    try { msg = JSON.parse(e.data); } catch { return; }
-
-    if (msg.type === "error") {
-      log("[oai error] " + (msg.error?.message || JSON.stringify(msg)));
-      return;
-    }
-
-    if (msg.type === "response.output_text.delta" || msg.type === "response.delta") {
-      const chunk =
-        (typeof msg.delta === "string" ? msg.delta : "") ||
-        (typeof msg.output_text === "string" ? msg.output_text : "");
-      const piece = (chunk || "").trim();
-      if (piece) ttsChunk(piece);
-    } else if (msg.type === "response.completed") {
-      ttsFlush();
-    }
-    // log('[dc msg] ' + e.data); // décommente si besoin
-  };
-
-  // ---------- SDP ----------
-  const offer = await pc.createOffer({ offerToReceiveAudio:false });
-  await pc.setLocalDescription(offer);
-  const sdpResponse = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
-    method:"POST",
-    body: offer.sdp,
-    headers:{ "Authorization":`Bearer ${EPHEMERAL_KEY}`, "Content-Type":"application/sdp" }
+function setupPlayer(){
+  const a = document.getElementById('out');
+  mediaSource = new MediaSource();
+  a.src = URL.createObjectURL(mediaSource);
+  mediaSource.addEventListener('sourceopen', ()=>{
+    // Eleven renvoie typiquement du MPEG (mp3). Ajuste si différent.
+    sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+    sourceBuffer.addEventListener('updateend', drain);
+    drain();
   });
-  if (!sdpResponse.ok) {
-    const t = await sdpResponse.text();
-    log('SDP error: ' + t);
-    setStatus('erreur SDP');
-    return;
-  }
-  const answer = { type:"answer", sdp: await sdpResponse.text() };
-  await pc.setRemoteDescription(answer);
-  setStatus('connecté — parle près du micro');
+}
+function drain(){
+  if (!sourceBuffer || sourceBuffer.updating) return;
+  if (!queue.length) return;
+  const chunk = queue.shift();
+  try { sourceBuffer.appendBuffer(chunk); } catch(e){ log('[append] '+e); }
 }
 
-/* ======================= Intro WAV (optionnelle) ======================= */
-async function playIntroParallel() {
-  const intro = document.getElementById('introAudio');
-  if (!intro) { return; }
-  try {
-    intro.currentTime = 0;
-    await intro.play();
-  } catch (e) {
-    log('[intro] autoplay bloqué: ' + e);
-  }
+async function connect(){
+  const r = await fetch('/signed-url');
+  const j = await r.json();
+  if (!j.signed_url){ log('No signed_url'); return; }
+
+  setupPlayer();
+  ws = new WebSocket(j.signed_url);         // token signé, pas de clé en front
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = ()=>{ log('[ws] open'); };
+  ws.onerror = (e)=>{ log('[ws] error ' + (e.message||'')); };
+  ws.onclose = ()=>{ log('[ws] close'); };
+
+  ws.onmessage = (ev)=>{
+    if (ev.data instanceof ArrayBuffer){
+      queue.push(new Uint8Array(ev.data));
+      drain();
+    } else {
+      // JSON d’état (facultatif)
+      // log('[ws json] ' + ev.data);
+    }
+  };
 }
 
-/* ======================= Boutons ======================= */
-document.getElementById("btnStart").addEventListener("click", async () => {
-  startAudioStream();       // commence à lire le flux mp3
-  playIntroParallel();      // joue l’intro locale si possible
-  startSession().catch(e => log('[session] échec: ' + e));
-});
+function sendText(t){
+  if (!ws || ws.readyState!==1) { log('WS pas connecté'); return; }
+  const m = { type: "user_message", text: t };   // protocole Agent
+  ws.send(JSON.stringify(m));
+}
 
-document.getElementById("btnStopRec").addEventListener("click", () => {
-  log('[rec] (stub) — ajoute ta logique si besoin');
-});
+document.getElementById('btnConnect').onclick = connect;
+document.getElementById('btnSend').onclick = ()=>{
+  const v = document.getElementById('msg').value.trim();
+  if (v) sendText(v);
+};
 </script>
 </body>
-</html>
 
 
 
