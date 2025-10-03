@@ -35,14 +35,23 @@ def get_signed_url():
     if not ELEVEN_API_KEY or not ELEVEN_AGENT_ID:
         return jsonify({"error": "Missing ELEVEN_API_KEY or ELEVEN_AGENT_ID"}), 500
 
-    r = requests.get(
-        "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url",
-        params={"agent_id": ELEVEN_AGENT_ID},
-        headers={"xi-api-key": ELEVEN_API_KEY},
-        timeout=10,
-    )
+    try:
+        r = requests.get(
+            "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url",
+            params={"agent_id": ELEVEN_AGENT_ID},
+            headers={"xi-api-key": ELEVEN_API_KEY},
+            timeout=10,
+        )
+    except Exception as e:
+        return jsonify({"status": "network_error", "error": str(e)}), 502
+
+    # renvoie TEL QUEL ce que dit ElevenLabs
     if r.status_code >= 300:
-        return jsonify({"status": r.status_code, "body": r.text}), 502
+        return jsonify({
+            "status": r.status_code,
+            "body": r.text,
+            "hint": "Clé/Agent invalide ? Workspace ?"
+        }), r.status_code
 
     return jsonify(r.json())  # { "signed_url": "wss://..." }
 
